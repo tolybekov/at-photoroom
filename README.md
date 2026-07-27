@@ -28,7 +28,9 @@ GitHub Pages is static hosting, so it cannot run the local upload server or keep
 - `public/photos.json` as the public photo manifest
 - `.github/workflows/deploy-pages.yml` to deploy the `public/` folder
 
-After uploading photos locally, run:
+On the live GitHub Pages site, the **OWNER** panel asks for a GitHub token instead of the local password. Use a token that can write to `tolybekov/at-photoroom` repository contents. The token is kept only in the current browser tab and is not committed into the website.
+
+You can also upload photos locally, then run:
 
 ```bash
 npm run sync:static

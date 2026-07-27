@@ -38,11 +38,12 @@
             <p>OWNER ACCESS</p>
             <button class="icon-button" value="cancel" type="button" data-close aria-label="Close">X</button>
           </div>
+          <p class="panel-note" id="owner-mode-note">LOCAL OWNER PASSWORD</p>
           <label>
-            <span>PASSWORD</span>
+            <span id="owner-secret-label">PASSWORD</span>
             <input id="password" name="password" type="password" autocomplete="current-password" required>
           </label>
-          <button class="solid-button" type="submit">ENTER</button>
+          <button class="solid-button" id="owner-enter-button" type="submit">ENTER</button>
         </form>
 
         <form class="owner-form is-hidden" id="upload-form">
@@ -77,6 +78,7 @@
             <button class="line-button" id="delete-selected" type="button">DELETE FOCUS</button>
             <button class="line-button" id="logout-button" type="button">EXIT</button>
           </div>
+          <p class="panel-note panel-status" id="owner-status" aria-live="polite"></p>
         </form>
       </dialog>
     </main>

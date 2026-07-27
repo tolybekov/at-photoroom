@@ -7,11 +7,21 @@ const loginForm = document.querySelector("#login-form");
 const uploadForm = document.querySelector("#upload-form");
 const logoutButton = document.querySelector("#logout-button");
 const deleteSelectedButton = document.querySelector("#delete-selected");
+const ownerSecretInput = document.querySelector("#password");
 const focusBar = document.querySelector("#focus-bar");
 const focusTitle = document.querySelector("#focus-title");
 const focusMeta = document.querySelector("#focus-meta");
 const photoCount = document.querySelector("#photo-count");
 const themeButton = document.querySelector("#theme-button");
+const ownerSecretLabel = document.querySelector("#owner-secret-label");
+const ownerModeNote = document.querySelector("#owner-mode-note");
+const ownerEnterButton = document.querySelector("#owner-enter-button");
+const ownerStatus = document.querySelector("#owner-status");
+
+const GITHUB_REPOSITORY = "tolybekov/at-photoroom";
+const GITHUB_BRANCH = "main";
+const GITHUB_API = `https://api.github.com/repos/${GITHUB_REPOSITORY}`;
+const MAX_GITHUB_UPLOAD_BYTES = 18 * 1024 * 1024;
 
 const renderer = new THREE.WebGLRenderer({
   canvas,
@@ -49,6 +59,7 @@ let selectedItem = null;
 let photos = [];
 let isAuthenticated = false;
 let staticMode = false;
+let githubToken = "";
 let pointerDown = null;
 let orbit = { x: 0, y: 0 };
 let desiredOrbit = { x: 0, y: 0 };
@@ -59,22 +70,28 @@ init();
 async function init() {
   setTheme(document.documentElement.dataset.theme === "dark" ? "dark" : "light");
   bindEvents();
-  await Promise.all([loadPhotos(), loadSession()]);
+  await loadSession();
+  await loadPhotos();
   animate();
 }
 
 async function loadPhotos() {
   try {
-    const payload = await fetchJson("photos.json").catch(() => fetchJson("api/photos"));
+    const payload = staticMode
+      ? await fetchJson("photos.json").catch(() => fetchJson("api/photos"))
+      : await fetchJson("api/photos").catch(() => fetchJson("photos.json"));
     photos = Array.isArray(payload.photos) ? payload.photos : [];
+    if (payload.fromApi) {
+      staticMode = false;
+    }
     if (payload.fromStatic) {
       staticMode = true;
-      syncOwnerForms();
     }
   } catch {
     photos = [];
   }
 
+  syncOwnerForms();
   photoCount.textContent = `${String(photos.length).padStart(2, "0")} PHOTOS`;
   rebuildStage();
 }
@@ -82,7 +99,7 @@ async function loadPhotos() {
 async function loadSession() {
   if (isGitHubPagesHost()) {
     staticMode = true;
-    isAuthenticated = false;
+    isAuthenticated = Boolean(githubToken);
     syncOwnerForms();
     return;
   }
@@ -144,11 +161,17 @@ function bindEvents() {
 
   loginForm.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const password = new FormData(loginForm).get("password");
+    const secret = String(new FormData(loginForm).get("password") || "").trim();
+
+    if (staticMode) {
+      await connectGitHubOwner(secret);
+      return;
+    }
+
     const response = await fetch("/api/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password })
+      body: JSON.stringify({ password: secret })
     });
 
     if (!response.ok) {
@@ -164,6 +187,12 @@ function bindEvents() {
   uploadForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     const formData = new FormData(uploadForm);
+
+    if (staticMode) {
+      await uploadPhotoToGitHub(formData);
+      return;
+    }
+
     const response = await fetch("/api/photos", {
       method: "POST",
       body: formData
@@ -181,6 +210,14 @@ function bindEvents() {
   });
 
   logoutButton.addEventListener("click", async () => {
+    if (staticMode) {
+      githubToken = "";
+      isAuthenticated = false;
+      setOwnerStatus("");
+      syncOwnerForms();
+      return;
+    }
+
     await fetch("/api/logout", { method: "POST" });
     isAuthenticated = false;
     syncOwnerForms();
@@ -188,6 +225,11 @@ function bindEvents() {
 
   deleteSelectedButton.addEventListener("click", async () => {
     if (!selectedItem || selectedItem.isPlaceholder) return;
+
+    if (staticMode) {
+      await deletePhotoFromGitHub(selectedItem.photo);
+      return;
+    }
 
     const response = await fetch(`/api/photos/${selectedItem.photo.id}`, { method: "DELETE" });
     if (response.ok) {
@@ -221,8 +263,9 @@ function rebuildStage() {
     const seed = hashToUnit(`${photo.id}-${index}`);
     const group = new THREE.Group();
     let item;
+    const imageSource = photo.previewSrc || photo.src;
     const material = new THREE.MeshBasicMaterial({
-      map: photo.src ? loadTexture(resolveMediaPath(photo.src), () => fitItemToTexture(item)) : makePlaceholderTexture(photo, index),
+      map: imageSource ? loadTexture(resolveMediaPath(imageSource), () => fitItemToTexture(item)) : makePlaceholderTexture(photo, index),
       side: THREE.DoubleSide,
       transparent: true
     });
@@ -734,10 +777,298 @@ function onKeyDown(event) {
 }
 
 function syncOwnerForms() {
+  if (staticMode) {
+    ownerSecretLabel.textContent = "GITHUB TOKEN";
+    ownerModeNote.textContent = "LIVE OWNER PUBLISH";
+    ownerEnterButton.textContent = "CONNECT";
+    ownerSecretInput.setAttribute("autocomplete", "off");
+    ownerSecretInput.setAttribute("data-raw-input", "");
+  } else {
+    ownerSecretLabel.textContent = "PASSWORD";
+    ownerModeNote.textContent = "LOCAL OWNER PASSWORD";
+    ownerEnterButton.textContent = "ENTER";
+    ownerSecretInput.setAttribute("autocomplete", "current-password");
+    ownerSecretInput.removeAttribute("data-raw-input");
+  }
+
   loginForm.classList.toggle("is-hidden", isAuthenticated);
   uploadForm.classList.toggle("is-hidden", !isAuthenticated);
   deleteSelectedButton.disabled = !selectedItem || selectedItem.isPlaceholder;
-  ownerButton.hidden = staticMode;
+  ownerButton.hidden = false;
+}
+
+async function connectGitHubOwner(token) {
+  if (!token) {
+    loginForm.animate(shakeFrames(), { duration: 240 });
+    return;
+  }
+
+  setOwnerStatus("CHECKING TOKEN");
+  ownerEnterButton.disabled = true;
+
+  try {
+    await githubRequest(`/contents/public/photos.json?ref=${encodeURIComponent(GITHUB_BRANCH)}`, { token });
+    githubToken = token;
+    isAuthenticated = true;
+    loginForm.reset();
+    setOwnerStatus("OWNER READY");
+    syncOwnerForms();
+  } catch {
+    githubToken = "";
+    isAuthenticated = false;
+    setOwnerStatus("TOKEN FAILED");
+    loginForm.animate(shakeFrames(), { duration: 240 });
+  } finally {
+    ownerEnterButton.disabled = false;
+  }
+}
+
+async function uploadPhotoToGitHub(formData) {
+  const file = formData.get("photo");
+  const uploadButton = uploadForm.querySelector("button[type='submit']");
+
+  if (!(file instanceof File) || file.size === 0) {
+    setOwnerStatus("CHOOSE AN IMAGE");
+    uploadForm.animate(shakeFrames(), { duration: 240 });
+    return;
+  }
+
+  if (file.size > MAX_GITHUB_UPLOAD_BYTES) {
+    setOwnerStatus("IMAGE IS TOO LARGE");
+    uploadForm.animate(shakeFrames(), { duration: 240 });
+    return;
+  }
+
+  const extension = extensionFromFile(file);
+  if (!extension) {
+    setOwnerStatus("IMAGE TYPE NOT SUPPORTED");
+    uploadForm.animate(shakeFrames(), { duration: 240 });
+    return;
+  }
+
+  uploadButton.disabled = true;
+  deleteSelectedButton.disabled = true;
+  setOwnerStatus("PREPARING PHOTO");
+
+  try {
+    const id = makeId();
+    const filename = `${Date.now()}-${id.slice(0, 8)}${extension}`;
+    const title = cleanText(formData.get("title")) || nameWithoutExtension(file.name) || "Untitled";
+    const photo = {
+      id,
+      title,
+      place: cleanText(formData.get("place")),
+      date: cleanText(formData.get("date")),
+      note: cleanText(formData.get("note")),
+      src: `/photos/${filename}`,
+      uploadedAt: new Date().toISOString()
+    };
+    const currentPhotos = await fetchGitHubPhotos();
+    const nextPhotos = [photo, ...currentPhotos];
+    const publicManifest = makePublicManifest(nextPhotos);
+    const imageBase64 = await fileToBase64(file);
+
+    setOwnerStatus("PUBLISHING");
+    await commitGitHubChanges(`Add ${title}`, [
+      { path: `public/photos/${filename}`, content: imageBase64, encoding: "base64" },
+      { path: "data/photos.json", content: `${JSON.stringify(nextPhotos, null, 2)}\n`, encoding: "utf-8" },
+      { path: "public/photos.json", content: `${JSON.stringify(publicManifest, null, 2)}\n`, encoding: "utf-8" }
+    ]);
+
+    photos = [{ ...photo, previewSrc: URL.createObjectURL(file) }, ...publicManifest.photos.slice(1)];
+    photoCount.textContent = `${String(photos.length).padStart(2, "0")} PHOTOS`;
+    uploadForm.reset();
+    ownerPanel.close();
+    rebuildStage();
+    selectItem(albumItems[0]);
+    setOwnerStatus("PUBLISHED");
+  } catch (error) {
+    console.error(error);
+    setOwnerStatus(error.message?.includes("409") ? "PULL LATEST AND TRY AGAIN" : "PUBLISH FAILED");
+    uploadForm.animate(shakeFrames(), { duration: 240 });
+  } finally {
+    uploadButton.disabled = false;
+    syncOwnerForms();
+  }
+}
+
+async function deletePhotoFromGitHub(photo) {
+  if (!photo?.id) return;
+
+  const sourcePath = photo.repositorySrc || photo.src || "";
+  if (!sourcePath || sourcePath.startsWith("blob:")) {
+    setOwnerStatus("RELOAD BEFORE DELETE");
+    return;
+  }
+
+  deleteSelectedButton.disabled = true;
+  setOwnerStatus("REMOVING");
+
+  try {
+    const currentPhotos = await fetchGitHubPhotos();
+    const target = currentPhotos.find((item) => item.id === photo.id);
+    const nextPhotos = currentPhotos.filter((item) => item.id !== photo.id);
+    const publicManifest = makePublicManifest(nextPhotos);
+    const targetPath = target ? `public/${stripLeadingSlash(target.src)}` : `public/${stripLeadingSlash(sourcePath)}`;
+
+    await commitGitHubChanges(`Remove ${photo.title || "photo"}`, [
+      { path: targetPath, remove: true },
+      { path: "data/photos.json", content: `${JSON.stringify(nextPhotos, null, 2)}\n`, encoding: "utf-8" },
+      { path: "public/photos.json", content: `${JSON.stringify(publicManifest, null, 2)}\n`, encoding: "utf-8" }
+    ]);
+
+    selectedItem = null;
+    photos = publicManifest.photos;
+    photoCount.textContent = `${String(photos.length).padStart(2, "0")} PHOTOS`;
+    hideFocusBar();
+    rebuildStage();
+    setOwnerStatus("REMOVED");
+  } catch (error) {
+    console.error(error);
+    setOwnerStatus("REMOVE FAILED");
+    uploadForm.animate(shakeFrames(), { duration: 240 });
+  } finally {
+    syncOwnerForms();
+  }
+}
+
+async function fetchGitHubPhotos() {
+  const file = await githubRequest(`/contents/data/photos.json?ref=${encodeURIComponent(GITHUB_BRANCH)}`);
+  const parsed = JSON.parse(decodeBase64Text(file.content || ""));
+  return Array.isArray(parsed) ? parsed : [];
+}
+
+async function commitGitHubChanges(message, entries) {
+  const ref = await githubRequest(`/git/ref/heads/${encodeURIComponent(GITHUB_BRANCH)}`);
+  const parentSha = ref.object.sha;
+  const parentCommit = await githubRequest(`/git/commits/${parentSha}`);
+  const tree = [];
+
+  for (const entry of entries) {
+    if (entry.remove) {
+      tree.push({ path: entry.path, mode: "100644", type: "blob", sha: null });
+      continue;
+    }
+
+    const blob = await githubRequest("/git/blobs", {
+      method: "POST",
+      body: {
+        content: entry.content,
+        encoding: entry.encoding || "utf-8"
+      }
+    });
+    tree.push({ path: entry.path, mode: "100644", type: "blob", sha: blob.sha });
+  }
+
+  const newTree = await githubRequest("/git/trees", {
+    method: "POST",
+    body: {
+      base_tree: parentCommit.tree.sha,
+      tree
+    }
+  });
+  const commit = await githubRequest("/git/commits", {
+    method: "POST",
+    body: {
+      message,
+      tree: newTree.sha,
+      parents: [parentSha]
+    }
+  });
+
+  await githubRequest(`/git/refs/heads/${encodeURIComponent(GITHUB_BRANCH)}`, {
+    method: "PATCH",
+    body: {
+      sha: commit.sha,
+      force: false
+    }
+  });
+
+  return commit;
+}
+
+async function githubRequest(path, { method = "GET", body, token = githubToken } = {}) {
+  const response = await fetch(`${GITHUB_API}${path}`, {
+    method,
+    headers: {
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(body ? { "Content-Type": "application/json" } : {})
+    },
+    body: body ? JSON.stringify(body) : undefined
+  });
+
+  if (!response.ok) {
+    const detail = await response.json().catch(() => ({}));
+    throw new Error(`${response.status} ${detail.message || response.statusText}`);
+  }
+
+  return response.status === 204 ? null : response.json();
+}
+
+function makePublicManifest(sourcePhotos) {
+  return {
+    photos: sourcePhotos.map((photo) => ({
+      ...photo,
+      src: typeof photo.src === "string" ? stripLeadingSlash(photo.src) : photo.src
+    })),
+    generatedAt: new Date().toISOString()
+  };
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => {
+      resolve(String(reader.result || "").split(",")[1] || "");
+    });
+    reader.addEventListener("error", () => reject(reader.error || new Error("Could not read file.")));
+    reader.readAsDataURL(file);
+  });
+}
+
+function decodeBase64Text(content) {
+  const binary = atob(content.replace(/\s/g, ""));
+  const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+
+function extensionFromFile(file) {
+  const typeMap = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "image/avif": ".avif"
+  };
+  return typeMap[file.type] || extensionFromName(file.name);
+}
+
+function extensionFromName(name) {
+  const match = String(name || "").toLowerCase().match(/\.(jpe?g|png|webp|gif|avif)$/);
+  return match ? `.${match[1].replace("jpeg", "jpg")}` : "";
+}
+
+function nameWithoutExtension(name) {
+  return String(name || "").replace(/\.[^.]+$/, "");
+}
+
+function cleanText(value) {
+  return String(value || "").trim().slice(0, 120);
+}
+
+function makeId() {
+  if (window.crypto?.randomUUID) return window.crypto.randomUUID();
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function setOwnerStatus(message) {
+  ownerStatus.textContent = message;
+}
+
+function stripLeadingSlash(value) {
+  return String(value || "").replace(/^\/+/, "");
 }
 
 function shakeFrames() {

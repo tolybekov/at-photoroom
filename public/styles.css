@@ -239,6 +239,18 @@ button {
   font-weight: 900;
 }
 
+.panel-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1.25;
+}
+
+.panel-status {
+  min-height: 13px;
+}
+
 label {
   display: grid;
   gap: 6px;
@@ -260,6 +272,11 @@ input {
   padding: 8px 9px;
   font-size: 12px;
   font-weight: 800;
+}
+
+input[data-raw-input] {
+  font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  text-transform: none;
 }
 
 input:focus-visible {
