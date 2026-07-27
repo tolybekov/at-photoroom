@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>AT Photoroom</title>
+    <script>
+      document.documentElement.dataset.theme = localStorage.getItem("at-theme") || "light";
+    </script>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <main class="room" aria-label="AT Photoroom">
+      <canvas id="room-canvas" aria-label="Floating photo album"></canvas>
+
+      <header class="masthead">
+        <a class="brand" href="./" aria-label="AT Photoroom">AT PHOTOROOM</a>
+        <div class="meta-strip" aria-hidden="true">
+          <span>PERSONAL ARCHIVE</span>
+          <span id="photo-count">00 PHOTOS</span>
+          <span>FLOATING ROOM</span>
+        </div>
+      </header>
+
+      <div class="corner-controls">
+        <button class="theme-button" id="theme-button" type="button" aria-label="Toggle dark mode">DARK</button>
+        <button class="owner-button" id="owner-button" type="button">OWNER</button>
+      </div>
+
+      <aside class="focus-bar" id="focus-bar" aria-live="polite">
+        <p id="focus-title">AT PHOTOROOM</p>
+        <p id="focus-meta">PRIVATE IMAGE ROOM</p>
+      </aside>
+
+      <dialog class="owner-panel" id="owner-panel">
+        <form class="owner-form" id="login-form" method="dialog">
+          <div class="panel-head">
+            <p>OWNER ACCESS</p>
+            <button class="icon-button" value="cancel" type="button" data-close aria-label="Close">X</button>
+          </div>
+          <label>
+            <span>PASSWORD</span>
+            <input id="password" name="password" type="password" autocomplete="current-password" required>
+          </label>
+          <button class="solid-button" type="submit">ENTER</button>
+        </form>
+
+        <form class="owner-form is-hidden" id="upload-form">
+          <div class="panel-head">
+            <p>ADD PHOTO</p>
+            <button class="icon-button" type="button" data-close aria-label="Close">X</button>
+          </div>
+          <label>
+            <span>IMAGE</span>
+            <input id="photo" name="photo" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/avif" required>
+          </label>
+          <label>
+            <span>TITLE</span>
+            <input id="title" name="title" type="text" maxlength="80" placeholder="AT PHOTO 01">
+          </label>
+          <div class="split">
+            <label>
+              <span>PLACE</span>
+              <input id="place" name="place" type="text" maxlength="80" placeholder="CITY">
+            </label>
+            <label>
+              <span>DATE</span>
+              <input id="date" name="date" type="text" maxlength="40" placeholder="2026">
+            </label>
+          </div>
+          <label>
+            <span>NOTE</span>
+            <input id="note" name="note" type="text" maxlength="120" placeholder="SHORT CAPTION">
+          </label>
+          <div class="actions">
+            <button class="solid-button" type="submit">UPLOAD</button>
+            <button class="line-button" id="delete-selected" type="button">DELETE FOCUS</button>
+            <button class="line-button" id="logout-button" type="button">EXIT</button>
+          </div>
+        </form>
+      </dialog>
+    </main>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

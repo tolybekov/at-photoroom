@@ -1,0 +1,839 @@
+import * as THREE from "./vendor/three.module.js";
+
+const canvas = document.querySelector("#room-canvas");
+const ownerButton = document.querySelector("#owner-button");
+const ownerPanel = document.querySelector("#owner-panel");
+const loginForm = document.querySelector("#login-form");
+const uploadForm = document.querySelector("#upload-form");
+const logoutButton = document.querySelector("#logout-button");
+const deleteSelectedButton = document.querySelector("#delete-selected");
+const focusBar = document.querySelector("#focus-bar");
+const focusTitle = document.querySelector("#focus-title");
+const focusMeta = document.querySelector("#focus-meta");
+const photoCount = document.querySelector("#photo-count");
+const themeButton = document.querySelector("#theme-button");
+
+const renderer = new THREE.WebGLRenderer({
+  canvas,
+  antialias: true,
+  alpha: true,
+  preserveDrawingBuffer: true,
+  powerPreference: "high-performance"
+});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(getCssColor("--paper"));
+
+const camera = new THREE.PerspectiveCamera(32, window.innerWidth / window.innerHeight, 0.1, 90);
+camera.position.set(0, 0.15, 13);
+
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2();
+const stage = new THREE.Group();
+scene.add(stage);
+
+const homeCamera = new THREE.Vector3(0, 0.15, 13);
+const cameraTarget = new THREE.Vector3(0, 0, 0);
+const desiredCamera = homeCamera.clone();
+const desiredTarget = cameraTarget.clone();
+const clock = new THREE.Clock();
+const textureLoader = new THREE.TextureLoader();
+const albumItems = [];
+const pan = new THREE.Vector3(0, 0, 0);
+const desiredPan = new THREE.Vector3(0, 0, 0);
+
+let selectedItem = null;
+let photos = [];
+let isAuthenticated = false;
+let staticMode = false;
+let pointerDown = null;
+let orbit = { x: 0, y: 0 };
+let desiredOrbit = { x: 0, y: 0 };
+let hasDragged = false;
+
+init();
+
+async function init() {
+  setTheme(document.documentElement.dataset.theme === "dark" ? "dark" : "light");
+  bindEvents();
+  await Promise.all([loadPhotos(), loadSession()]);
+  animate();
+}
+
+async function loadPhotos() {
+  try {
+    const payload = await fetchJson("photos.json").catch(() => fetchJson("api/photos"));
+    photos = Array.isArray(payload.photos) ? payload.photos : [];
+    if (payload.fromStatic) {
+      staticMode = true;
+      syncOwnerForms();
+    }
+  } catch {
+    photos = [];
+  }
+
+  photoCount.textContent = `${String(photos.length).padStart(2, "0")} PHOTOS`;
+  rebuildStage();
+}
+
+async function loadSession() {
+  if (isGitHubPagesHost()) {
+    staticMode = true;
+    isAuthenticated = false;
+    syncOwnerForms();
+    return;
+  }
+
+  try {
+    const payload = await fetchJson("api/session");
+    isAuthenticated = Boolean(payload.authenticated);
+    staticMode = false;
+  } catch {
+    isAuthenticated = false;
+    staticMode = true;
+  }
+
+  syncOwnerForms();
+}
+
+async function fetchJson(url) {
+  const response = await fetch(url, {
+    cache: "no-store",
+    headers: { Accept: "application/json" }
+  });
+  const contentType = response.headers.get("content-type") || "";
+
+  if (!response.ok || !contentType.includes("application/json")) {
+    throw new Error(`Could not load ${url}`);
+  }
+
+  const payload = await response.json();
+  if (url.startsWith("api/")) {
+    payload.fromApi = true;
+  }
+  if (url.startsWith("photos.json")) {
+    payload.fromStatic = true;
+  }
+  return payload;
+}
+
+function bindEvents() {
+  window.addEventListener("resize", onResize);
+  window.addEventListener("keydown", onKeyDown);
+  canvas.addEventListener("pointerdown", onPointerDown);
+  canvas.addEventListener("pointermove", onPointerMove);
+  canvas.addEventListener("pointerup", onPointerUp);
+  canvas.addEventListener("pointercancel", resetPointer);
+  canvas.addEventListener("wheel", onWheel, { passive: false });
+
+  ownerButton.addEventListener("click", () => {
+    syncOwnerForms();
+    ownerPanel.showModal();
+  });
+
+  themeButton.addEventListener("click", () => {
+    setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+  });
+
+  ownerPanel.querySelectorAll("[data-close]").forEach((button) => {
+    button.addEventListener("click", () => ownerPanel.close());
+  });
+
+  loginForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const password = new FormData(loginForm).get("password");
+    const response = await fetch("/api/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password })
+    });
+
+    if (!response.ok) {
+      loginForm.animate(shakeFrames(), { duration: 240 });
+      return;
+    }
+
+    isAuthenticated = true;
+    loginForm.reset();
+    syncOwnerForms();
+  });
+
+  uploadForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const formData = new FormData(uploadForm);
+    const response = await fetch("/api/photos", {
+      method: "POST",
+      body: formData
+    });
+
+    if (!response.ok) {
+      uploadForm.animate(shakeFrames(), { duration: 240 });
+      return;
+    }
+
+    uploadForm.reset();
+    ownerPanel.close();
+    await loadPhotos();
+    selectItem(albumItems[0]);
+  });
+
+  logoutButton.addEventListener("click", async () => {
+    await fetch("/api/logout", { method: "POST" });
+    isAuthenticated = false;
+    syncOwnerForms();
+  });
+
+  deleteSelectedButton.addEventListener("click", async () => {
+    if (!selectedItem || selectedItem.isPlaceholder) return;
+
+    const response = await fetch(`/api/photos/${selectedItem.photo.id}`, { method: "DELETE" });
+    if (response.ok) {
+      selectedItem = null;
+      hideFocusBar();
+      await loadPhotos();
+    }
+  });
+}
+
+function rebuildStage() {
+  selectedItem = null;
+  hideFocusBar();
+  syncOwnerForms();
+  clampPan();
+
+  while (stage.children.length) {
+    const child = stage.children.pop();
+    disposeObject(child);
+  }
+
+  albumItems.length = 0;
+  const sourcePhotos = photos.length ? photos : createPlaceholderPhotos();
+  const hasRealPhotos = photos.length > 0;
+  const specs = sourcePhotos.map((photo, index) => ({
+    baseSize: getBaseSize(photo, index, sourcePhotos.length)
+  }));
+  const placements = createPhotoPlacements(sourcePhotos, specs, hasRealPhotos);
+
+  sourcePhotos.forEach((photo, index) => {
+    const seed = hashToUnit(`${photo.id}-${index}`);
+    const group = new THREE.Group();
+    let item;
+    const material = new THREE.MeshBasicMaterial({
+      map: photo.src ? loadTexture(resolveMediaPath(photo.src), () => fitItemToTexture(item)) : makePlaceholderTexture(photo, index),
+      side: THREE.DoubleSide,
+      transparent: true
+    });
+    const geometry = new THREE.PlaneGeometry(1, 1);
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.userData.itemIndex = index;
+    group.add(mesh);
+
+    const border = makeBorder();
+    border.userData.itemIndex = index;
+    group.add(border);
+
+    group.position.copy(screenPointToWorld(placements[index].x, placements[index].y, placements[index].z));
+    group.rotation.set(
+      lerp(-0.15, 0.15, hashToUnit(`${photo.id}-rx`)),
+      lerp(-0.48, 0.48, hashToUnit(`${photo.id}-ry`)),
+      lerp(-0.08, 0.08, hashToUnit(`${photo.id}-rz`))
+    );
+
+    const baseSize = specs[index].baseSize;
+    item = {
+      photo,
+      group,
+      mesh,
+      border,
+      basePosition: group.position.clone(),
+      baseRotation: group.rotation.clone(),
+      baseSize,
+      aspect: 1,
+      phase: seed * Math.PI * 2,
+      isPlaceholder: photo.placeholder
+    };
+    albumItems.push(item);
+    stage.add(group);
+
+    if (!photo.src) {
+      material.map.colorSpace = THREE.SRGBColorSpace;
+      material.map.needsUpdate = true;
+      fitItemToTexture(item);
+    } else if (material.map.image?.complete) {
+      material.map.colorSpace = THREE.SRGBColorSpace;
+      material.map.needsUpdate = true;
+      fitItemToTexture(item);
+    }
+  });
+}
+
+function createPhotoPlacements(sourcePhotos, specs, hasRealPhotos) {
+  camera.updateProjectionMatrix();
+  camera.updateMatrixWorld();
+
+  if (!hasRealPhotos) {
+    const placements = [];
+    sourcePhotos.forEach((photo, index) => {
+      const placement =
+        index === 0
+          ? { x: 0.5, y: window.innerWidth < 760 ? 0.48 : 0.52, z: 1.35, rx: 0.13, ry: 0.13 }
+          : pickOpenPlacement(photo, index, specs[index].baseSize, placements);
+      placements.push(placement);
+    });
+    return placements;
+  }
+
+  const placements = new Array(sourcePhotos.length);
+  const placed = [];
+  const layoutOrder = sourcePhotos
+    .map((photo, index) => ({ index, weight: specs[index].baseSize + hashToUnit(`${photo.id}-layout-weight`) * 0.7 }))
+    .sort((a, b) => b.weight - a.weight);
+
+  layoutOrder.forEach(({ index }) => {
+    const placement = pickOpenPlacement(sourcePhotos[index], index, specs[index].baseSize, placed);
+    placements[index] = placement;
+    placed.push(placement);
+  });
+
+  return placements;
+}
+
+function pickOpenPlacement(photo, index, baseSize, placed) {
+  const mobile = window.innerWidth < 760;
+  const marginX = mobile ? 0.12 : 0.055;
+  const marginTop = mobile ? 0.2 : 0.08;
+  const marginBottom = mobile ? 0.08 : 0.1;
+  const attempts = mobile ? 120 : 180;
+  let best = null;
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const sample = sampleCandidate(photo, index, attempt, marginX, marginTop, marginBottom, mobile);
+    const radius = estimateScreenRadius(baseSize, sample.z);
+    const candidate = {
+      ...sample,
+      rx: radius / Math.max(camera.aspect, 0.75),
+      ry: radius
+    };
+    keepCandidateInFrame(candidate, mobile);
+    const score = scorePlacement(candidate, placed, mobile);
+
+    if (!best || score > best.score) {
+      best = { ...candidate, score };
+    }
+  }
+
+  return best;
+}
+
+function sampleCandidate(photo, index, attempt, marginX, marginTop, marginBottom, mobile) {
+  const seed = Math.floor(hashToUnit(`${photo.id}-${index}-layout`) * 10_000) + 1;
+  const width = 1 - marginX * 2;
+  const height = 1 - marginTop - marginBottom;
+  const xJitter = (hashToUnit(`${photo.id}-${attempt}-jx`) - 0.5) * 0.035;
+  const yJitter = (hashToUnit(`${photo.id}-${attempt}-jy`) - 0.5) * 0.035;
+  const depthMin = mobile ? -9.2 : -10.2;
+  const depthMax = mobile ? 1.25 : 1.85;
+
+  return {
+    x: THREE.MathUtils.clamp(marginX + halton(seed + attempt * 31, 2) * width + xJitter, marginX, 1 - marginX),
+    y: THREE.MathUtils.clamp(marginTop + halton(seed + attempt * 47, 3) * height + yJitter, marginTop, 1 - marginBottom),
+    z: lerp(depthMin, depthMax, halton(seed + attempt * 19, 5))
+  };
+}
+
+function keepCandidateInFrame(candidate, mobile) {
+  const edgePad = mobile ? 0.035 : 0.028;
+  const topPad = mobile ? 0.055 : 0.07;
+  const bottomPad = mobile ? 0.035 : 0.04;
+  const minX = candidate.rx + edgePad;
+  const maxX = 1 - candidate.rx - edgePad;
+  const minY = candidate.ry + topPad;
+  const maxY = 1 - candidate.ry - bottomPad;
+
+  candidate.x = clampBetween(candidate.x, minX, maxX);
+  candidate.y = clampBetween(candidate.y, minY, maxY);
+}
+
+function scorePlacement(candidate, placed, mobile) {
+  const protectedPenalty = getProtectedRects(mobile).reduce(
+    (sum, rect) => sum + overlapPenalty(candidate, rect),
+    0
+  );
+  const zonePenalty = placed.filter((other) => getZone(other, mobile) === getZone(candidate, mobile)).length * 38;
+  const edgePenalty = edgeCrowding(candidate) * 20;
+  const depthPreference = candidate.z > -2.5 && candidate.y < 0.34 ? 30 : 0;
+  let spacingScore = 0;
+
+  placed.forEach((other) => {
+    const dx = (candidate.x - other.x) * camera.aspect;
+    const dy = candidate.y - other.y;
+    const distance = Math.hypot(dx, dy);
+    const preferredDistance = candidate.ry + other.ry + (mobile ? 0.18 : 0.13);
+    const depthSeparation = Math.abs(candidate.z - other.z);
+
+    spacingScore += Math.min(distance, 0.65) * 7;
+
+    if (distance < preferredDistance) {
+      spacingScore -= (preferredDistance - distance) * 360;
+    }
+
+    if (distance < preferredDistance * 1.4 && depthSeparation < 3.2) {
+      spacingScore -= (3.2 - depthSeparation) * 12;
+    }
+  });
+
+  const lightRandomTieBreak = hashToUnit(`${candidate.x}-${candidate.y}-${candidate.z}`) * 0.08;
+  return spacingScore - protectedPenalty - zonePenalty - edgePenalty - depthPreference + lightRandomTieBreak;
+}
+
+function getProtectedRects(mobile) {
+  if (mobile) {
+    return [
+      { left: 0, top: 0, right: 0.96, bottom: 0.17, weight: 240 },
+      { left: 0.72, top: 0.9, right: 1, bottom: 1, weight: 110 }
+    ];
+  }
+
+  return [
+    { left: 0, top: 0, right: 0.58, bottom: 0.32, weight: 260 },
+    { left: 0.82, top: 0.02, right: 1, bottom: 0.16, weight: 135 },
+    { left: 0.88, top: 0.9, right: 1, bottom: 1, weight: 100 }
+  ];
+}
+
+function overlapPenalty(candidate, rect) {
+  const candidateRect = {
+    left: candidate.x - candidate.rx,
+    top: candidate.y - candidate.ry,
+    right: candidate.x + candidate.rx,
+    bottom: candidate.y + candidate.ry
+  };
+  const overlapWidth = Math.max(0, Math.min(candidateRect.right, rect.right) - Math.max(candidateRect.left, rect.left));
+  const overlapHeight = Math.max(0, Math.min(candidateRect.bottom, rect.bottom) - Math.max(candidateRect.top, rect.top));
+  const overlapArea = overlapWidth * overlapHeight;
+
+  if (!overlapArea) return 0;
+
+  const foregroundMultiplier = candidate.z > -4 ? 2.4 : 1;
+  return rect.weight * foregroundMultiplier + overlapArea * rect.weight * 900;
+}
+
+function edgeCrowding(candidate) {
+  const left = Math.max(0, 0.03 - (candidate.x - candidate.rx));
+  const right = Math.max(0, candidate.x + candidate.rx - 0.97);
+  const top = Math.max(0, 0.04 - (candidate.y - candidate.ry));
+  const bottom = Math.max(0, candidate.y + candidate.ry - 0.96);
+  return left + right + top + bottom;
+}
+
+function getZone(candidate, mobile) {
+  const columns = mobile ? 3 : 5;
+  const rows = mobile ? 5 : 4;
+  const column = THREE.MathUtils.clamp(Math.floor(candidate.x * columns), 0, columns - 1);
+  const row = THREE.MathUtils.clamp(Math.floor(candidate.y * rows), 0, rows - 1);
+  return `${column}-${row}`;
+}
+
+function estimateScreenRadius(baseSize, z) {
+  const distance = Math.max(0.1, camera.position.z - z);
+  const visibleHeight = 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2) * distance;
+  const projectedHeight = (baseSize * 1.24) / visibleHeight;
+  return THREE.MathUtils.clamp(projectedHeight * 0.5, 0.035, window.innerWidth < 760 ? 0.22 : 0.18);
+}
+
+function screenPointToWorld(screenX, screenY, z) {
+  const point = new THREE.Vector3(screenX * 2 - 1, 1 - screenY * 2, 0.5).unproject(camera);
+  const direction = point.sub(camera.position).normalize();
+  const distance = (z - camera.position.z) / direction.z;
+  return camera.position.clone().add(direction.multiplyScalar(distance));
+}
+
+function getBaseSize(photo, index, count) {
+  const density = THREE.MathUtils.clamp(1 - Math.max(0, count - 10) * 0.018, 0.76, 1);
+  const largePhotoBrake = count > 16 ? 0.92 : 1;
+  return lerp(0.92, 2.18, hashToUnit(`${photo.id}-${index}-s`)) * density * largePhotoBrake;
+}
+
+function loadTexture(src, onLoad) {
+  const texture = textureLoader.load(src, () => {
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.needsUpdate = true;
+    onLoad?.();
+  });
+  return texture;
+}
+
+function fitItemToTexture(item) {
+  const image = item.mesh.material.map.image;
+  const width = image?.naturalWidth || image?.videoWidth || image?.width || 1;
+  const height = image?.naturalHeight || image?.videoHeight || image?.height || 1;
+  const aspect = width / height;
+  item.aspect = aspect;
+
+  const maxWide = item.baseSize;
+  const maxTall = item.baseSize * 1.24;
+  const planeWidth = aspect >= 1 ? maxWide : maxTall * aspect;
+  const planeHeight = aspect >= 1 ? maxWide / aspect : maxTall;
+  item.mesh.scale.set(planeWidth, planeHeight, 1);
+  item.border.scale.set(planeWidth, planeHeight, 1);
+}
+
+function makeBorder() {
+  const points = [
+    new THREE.Vector3(-0.5, -0.5, 0.003),
+    new THREE.Vector3(0.5, -0.5, 0.003),
+    new THREE.Vector3(0.5, 0.5, 0.003),
+    new THREE.Vector3(-0.5, 0.5, 0.003),
+    new THREE.Vector3(-0.5, -0.5, 0.003)
+  ];
+  const geometry = new THREE.BufferGeometry().setFromPoints(points);
+  const material = new THREE.LineBasicMaterial({ color: 0x090909, transparent: true, opacity: 0.28 });
+  return new THREE.Line(geometry, material);
+}
+
+function makePlaceholderTexture(photo, index) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 1024;
+  canvas.height = 1280;
+  const ctx = canvas.getContext("2d");
+  const tones = ["#101010", "#f3f3ef", "#d8362f"];
+  const inverted = index % 2 === 0;
+
+  ctx.fillStyle = inverted ? tones[0] : tones[1];
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.strokeStyle = inverted ? tones[1] : tones[0];
+  ctx.lineWidth = 20;
+  ctx.strokeRect(58, 58, canvas.width - 116, canvas.height - 116);
+
+  ctx.fillStyle = tones[2];
+  ctx.fillRect(88 + index * 14, 120, 82, 28);
+  ctx.fillStyle = inverted ? tones[1] : tones[0];
+  ctx.font = "900 96px Helvetica, Arial, sans-serif";
+  ctx.fillText("AT", 88, 270);
+  ctx.font = "900 54px Helvetica, Arial, sans-serif";
+  ctx.fillText(String(index + 1).padStart(2, "0"), 88, 360);
+  ctx.font = "900 38px Helvetica, Arial, sans-serif";
+  ctx.fillText(photo.title, 88, 1090);
+  ctx.fillText("PRIVATE FRAME", 88, 1144);
+
+  for (let i = 0; i < 900; i += 1) {
+    const shade = Math.random() > 0.5 ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.08)";
+    ctx.fillStyle = shade;
+    ctx.fillRect(Math.random() * canvas.width, Math.random() * canvas.height, 1, 1);
+  }
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
+}
+
+function createPlaceholderPhotos() {
+  return Array.from({ length: 9 }, (_, index) => ({
+    id: `placeholder-${index}`,
+    title: `AT FRAME ${String(index + 1).padStart(2, "0")}`,
+    place: "PRIVATE ARCHIVE",
+    date: "READY",
+    note: "EMPTY FRAME",
+    placeholder: true
+  }));
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  const elapsed = clock.getElapsedTime();
+
+  orbit.x = lerp(orbit.x, desiredOrbit.x, 0.06);
+  orbit.y = lerp(orbit.y, desiredOrbit.y, 0.06);
+  pan.lerp(desiredPan, 0.08);
+  stage.position.copy(pan);
+  stage.rotation.y = orbit.x;
+  stage.rotation.x = orbit.y;
+
+  albumItems.forEach((item, index) => {
+    const isSelected = item === selectedItem;
+    const floatY = Math.sin(elapsed * 0.45 + item.phase) * 0.12;
+    const floatX = Math.cos(elapsed * 0.31 + item.phase) * 0.06;
+    const targetPosition = isSelected
+      ? item.basePosition.clone().add(new THREE.Vector3(0, 0, 0.45))
+      : item.basePosition.clone().add(new THREE.Vector3(floatX, floatY, 0));
+
+    item.group.position.lerp(targetPosition, isSelected ? 0.1 : 0.035);
+    item.group.rotation.x = lerp(item.group.rotation.x, isSelected ? 0 : item.baseRotation.x, 0.06);
+    item.group.rotation.y = lerp(item.group.rotation.y, isSelected ? 0 : item.baseRotation.y, 0.06);
+    item.group.rotation.z = lerp(item.group.rotation.z, isSelected ? 0 : item.baseRotation.z, 0.06);
+    item.mesh.material.opacity = lerp(item.mesh.material.opacity ?? 1, selectedItem && !isSelected ? 0.34 : 1, 0.08);
+    item.border.material.opacity = lerp(item.border.material.opacity, isSelected ? 0.84 : 0.28, 0.08);
+    item.group.renderOrder = isSelected ? 10 : index;
+  });
+
+  camera.position.lerp(desiredCamera, 0.06);
+  cameraTarget.lerp(desiredTarget, 0.08);
+  camera.lookAt(cameraTarget);
+  renderer.render(scene, camera);
+  updateFocusBar();
+}
+
+function selectItem(item) {
+  if (!item) return;
+  selectedItem = item;
+  const worldPosition = item.group.getWorldPosition(new THREE.Vector3());
+  desiredTarget.copy(worldPosition);
+  desiredCamera.set(worldPosition.x, worldPosition.y + 0.08, worldPosition.z + 4.25);
+  desiredOrbit = { x: 0, y: 0 };
+
+  const title = item.photo.title || "UNTITLED";
+  const meta = [item.photo.place, item.photo.date, item.photo.note].filter(Boolean).join(" / ") || "AT PHOTOROOM";
+  focusTitle.textContent = title;
+  focusTitle.title = title;
+  focusMeta.textContent = meta;
+  focusMeta.title = meta;
+  focusBar.classList.add("is-visible");
+  syncOwnerForms();
+}
+
+function clearFocus() {
+  selectedItem = null;
+  desiredCamera.copy(homeCamera);
+  desiredTarget.set(0, 0, 0);
+  hideFocusBar();
+  syncOwnerForms();
+}
+
+function hideFocusBar() {
+  focusBar.classList.remove("is-visible");
+}
+
+function updateFocusBar() {
+  if (!selectedItem) return;
+
+  const item = selectedItem;
+  const corners = [
+    new THREE.Vector3(-0.5, -0.5, 0),
+    new THREE.Vector3(0.5, -0.5, 0),
+    new THREE.Vector3(-0.5, 0.5, 0),
+    new THREE.Vector3(0.5, 0.5, 0)
+  ].map((corner) => {
+    const projected = item.mesh.localToWorld(corner).project(camera);
+    return {
+      x: (projected.x * 0.5 + 0.5) * window.innerWidth,
+      y: (-projected.y * 0.5 + 0.5) * window.innerHeight
+    };
+  });
+
+  const minX = Math.min(...corners.map((corner) => corner.x));
+  const maxX = Math.max(...corners.map((corner) => corner.x));
+  const maxY = Math.max(...corners.map((corner) => corner.y));
+  const width = Math.max(190, Math.min(maxX - minX, window.innerWidth - 32));
+  const left = Math.min(Math.max(minX, 16), window.innerWidth - width - 16);
+  const top = Math.min(Math.max(maxY + 4, 72), window.innerHeight - focusBar.offsetHeight - 18);
+
+  focusBar.style.left = `${left}px`;
+  focusBar.style.top = `${top}px`;
+  focusBar.style.width = `${width}px`;
+}
+
+function onPointerDown(event) {
+  pointerDown = {
+    x: event.clientX,
+    y: event.clientY,
+    mode: event.shiftKey || event.altKey ? "orbit" : "pan"
+  };
+  hasDragged = false;
+  canvas.setPointerCapture(event.pointerId);
+}
+
+function onPointerMove(event) {
+  if (!pointerDown) return;
+  const dx = event.clientX - pointerDown.x;
+  const dy = event.clientY - pointerDown.y;
+  if (Math.abs(dx) + Math.abs(dy) > 6) {
+    hasDragged = true;
+  }
+  if (!selectedItem && pointerDown.mode === "orbit") {
+    desiredOrbit.x += dx * 0.0009;
+    desiredOrbit.y += dy * 0.0007;
+    desiredOrbit.y = THREE.MathUtils.clamp(desiredOrbit.y, -0.24, 0.24);
+  } else if (!selectedItem) {
+    const sensitivity = getPanSensitivity();
+    desiredPan.x += dx * sensitivity;
+    desiredPan.y -= dy * sensitivity;
+    clampPan();
+  }
+  pointerDown = { ...pointerDown, x: event.clientX, y: event.clientY };
+}
+
+function onPointerUp(event) {
+  canvas.releasePointerCapture(event.pointerId);
+  if (!hasDragged) {
+    pick(event.clientX, event.clientY);
+  }
+  resetPointer();
+}
+
+function resetPointer() {
+  pointerDown = null;
+  hasDragged = false;
+}
+
+function pick(clientX, clientY) {
+  pointer.x = (clientX / window.innerWidth) * 2 - 1;
+  pointer.y = -(clientY / window.innerHeight) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+
+  const intersects = raycaster.intersectObjects(albumItems.map((item) => item.mesh), false);
+  if (!intersects.length) {
+    clearFocus();
+    return;
+  }
+
+  const index = intersects[0].object.userData.itemIndex;
+  selectItem(albumItems[index]);
+}
+
+function onWheel(event) {
+  event.preventDefault();
+  if (selectedItem) return;
+  homeCamera.z = THREE.MathUtils.clamp(homeCamera.z + event.deltaY * 0.006, 8.5, 17);
+  desiredCamera.copy(homeCamera);
+  clampPan();
+}
+
+function onResize() {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  clampPan();
+  rebuildStage();
+}
+
+function onKeyDown(event) {
+  if (selectedItem || isTypingTarget(event.target) || ownerPanel.open) return;
+
+  const step = getPanSensitivity() * 48;
+  const moves = {
+    ArrowLeft: [step, 0],
+    KeyA: [step, 0],
+    ArrowRight: [-step, 0],
+    KeyD: [-step, 0],
+    ArrowUp: [0, -step],
+    KeyW: [0, -step],
+    ArrowDown: [0, step],
+    KeyS: [0, step]
+  };
+  const move = moves[event.code];
+  if (!move) return;
+
+  event.preventDefault();
+  desiredPan.x += move[0];
+  desiredPan.y += move[1];
+  clampPan();
+}
+
+function syncOwnerForms() {
+  loginForm.classList.toggle("is-hidden", isAuthenticated);
+  uploadForm.classList.toggle("is-hidden", !isAuthenticated);
+  deleteSelectedButton.disabled = !selectedItem || selectedItem.isPlaceholder;
+  ownerButton.hidden = staticMode;
+}
+
+function shakeFrames() {
+  return [
+    { transform: "translateX(0)" },
+    { transform: "translateX(-8px)" },
+    { transform: "translateX(8px)" },
+    { transform: "translateX(0)" }
+  ];
+}
+
+function disposeObject(object) {
+  object.traverse((child) => {
+    if (child.geometry) child.geometry.dispose();
+    if (child.material) {
+      if (child.material.map) child.material.map.dispose();
+      child.material.dispose();
+    }
+  });
+}
+
+function lerp(a, b, t) {
+  return a + (b - a) * t;
+}
+
+function getPanSensitivity() {
+  const distance = Math.max(0.1, camera.position.z - cameraTarget.z);
+  const visibleHeight = 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2) * distance;
+  return visibleHeight / Math.max(window.innerHeight, 1);
+}
+
+function clampPan() {
+  const mobile = window.innerWidth < 760;
+  const zoom = THREE.MathUtils.clamp((homeCamera.z - 8.5) / 8.5, 0, 1);
+  const limitX = (mobile ? 0.95 : 1.65) + zoom * (mobile ? 0.45 : 0.8);
+  const limitY = (mobile ? 1.45 : 1.05) + zoom * (mobile ? 0.55 : 0.55);
+
+  desiredPan.x = THREE.MathUtils.clamp(desiredPan.x, -limitX, limitX);
+  desiredPan.y = THREE.MathUtils.clamp(desiredPan.y, -limitY, limitY);
+  pan.x = THREE.MathUtils.clamp(pan.x, -limitX, limitX);
+  pan.y = THREE.MathUtils.clamp(pan.y, -limitY, limitY);
+}
+
+function clampBetween(value, min, max) {
+  if (min > max) {
+    return (min + max) / 2;
+  }
+
+  return THREE.MathUtils.clamp(value, min, max);
+}
+
+function isTypingTarget(target) {
+  return ["INPUT", "TEXTAREA", "SELECT"].includes(target?.tagName);
+}
+
+function isGitHubPagesHost() {
+  return window.location.hostname.endsWith("github.io");
+}
+
+function setTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  localStorage.setItem("at-theme", theme);
+  themeButton.textContent = theme === "dark" ? "LIGHT" : "DARK";
+  themeButton.setAttribute("aria-label", theme === "dark" ? "Switch to light mode" : "Switch to dark mode");
+  scene.background.set(getCssColor("--paper"));
+}
+
+function getCssColor(variableName) {
+  return getComputedStyle(document.documentElement).getPropertyValue(variableName).trim() || "#f4f4f2";
+}
+
+function resolveMediaPath(src) {
+  if (!src) return "";
+  if (/^(https?:)?\/\//.test(src) || src.startsWith("data:") || src.startsWith("blob:")) return src;
+  return src.replace(/^\/+/, "");
+}
+
+function hashToUnit(input) {
+  let hash = 2166136261;
+  for (let i = 0; i < input.length; i += 1) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0) / 4294967295;
+}
+
+function halton(index, base) {
+  let result = 0;
+  let fraction = 1 / base;
+  let current = index;
+
+  while (current > 0) {
+    result += fraction * (current % base);
+    current = Math.floor(current / base);
+    fraction /= base;
+  }
+
+  return result;
+}
