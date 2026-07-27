@@ -668,14 +668,28 @@ function updateFocusBar() {
 
   const minX = Math.min(...corners.map((corner) => corner.x));
   const maxX = Math.max(...corners.map((corner) => corner.x));
+  const minY = Math.min(...corners.map((corner) => corner.y));
   const maxY = Math.max(...corners.map((corner) => corner.y));
-  const width = Math.max(190, Math.min(maxX - minX, window.innerWidth - 32));
-  const left = Math.min(Math.max(minX, 16), window.innerWidth - width - 16);
-  const top = Math.min(Math.max(maxY + 4, 72), window.innerHeight - focusBar.offsetHeight - 18);
+  const photoWidth = maxX - minX;
+  const mobile = window.innerWidth < 720;
+  const width = Math.max(
+    mobile ? 230 : 360,
+    Math.min(photoWidth + (mobile ? 44 : 180), window.innerWidth - 32)
+  );
+  const photoCenter = minX + photoWidth / 2;
+  const left = Math.min(Math.max(photoCenter - width / 2, 16), window.innerWidth - width - 16);
 
   focusBar.style.left = `${left}px`;
-  focusBar.style.top = `${top}px`;
   focusBar.style.width = `${width}px`;
+
+  const barHeight = focusBar.offsetHeight;
+  const belowTop = maxY + 4;
+  const aboveTop = minY - barHeight - 4;
+  const top = belowTop + barHeight <= window.innerHeight - 18
+    ? Math.max(belowTop, 72)
+    : Math.max(Math.min(aboveTop, window.innerHeight - barHeight - 18), 72);
+
+  focusBar.style.top = `${top}px`;
 }
 
 function onPointerDown(event) {
