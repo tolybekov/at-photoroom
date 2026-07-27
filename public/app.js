@@ -22,15 +22,17 @@ const GITHUB_REPOSITORY = "tolybekov/at-photoroom";
 const GITHUB_BRANCH = "main";
 const GITHUB_API = `https://api.github.com/repos/${GITHUB_REPOSITORY}`;
 const MAX_GITHUB_UPLOAD_BYTES = 18 * 1024 * 1024;
+const DISPLAY_IMAGE_SIZE = 1600;
+const MOBILE_IMAGE_SIZE = 900;
 
 const renderer = new THREE.WebGLRenderer({
   canvas,
   antialias: true,
   alpha: true,
-  preserveDrawingBuffer: true,
+  preserveDrawingBuffer: false,
   powerPreference: "high-performance"
 });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.setPixelRatio(getRendererPixelRatio());
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 
@@ -263,7 +265,7 @@ function rebuildStage() {
     const seed = hashToUnit(`${photo.id}-${index}`);
     const group = new THREE.Group();
     let item;
-    const imageSource = photo.previewSrc || photo.src;
+    const imageSource = getTextureSource(photo);
     const material = new THREE.MeshBasicMaterial({
       map: imageSource ? loadTexture(resolveMediaPath(imageSource), () => fitItemToTexture(item)) : makePlaceholderTexture(photo, index),
       side: THREE.DoubleSide,
@@ -503,9 +505,15 @@ function getBaseSize(photo, index, count) {
 function loadTexture(src, onLoad) {
   const texture = textureLoader.load(src, () => {
     texture.colorSpace = THREE.SRGBColorSpace;
+    texture.generateMipmaps = false;
+    texture.minFilter = THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
     texture.needsUpdate = true;
     onLoad?.();
   });
+  texture.generateMipmaps = false;
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
   return texture;
 }
 
@@ -761,7 +769,7 @@ function onWheel(event) {
 function onResize() {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setPixelRatio(getRendererPixelRatio());
   renderer.setSize(window.innerWidth, window.innerHeight);
   clampPan();
   rebuildStage();
@@ -878,18 +886,30 @@ async function uploadPhotoToGitHub(formData) {
       uploadedAt: new Date().toISOString()
     };
     const currentPhotos = await fetchGitHubPhotos();
+    setOwnerStatus("OPTIMIZING");
+    const displayImage = await makeDisplayImage(file, DISPLAY_IMAGE_SIZE, 0.78);
+    const mobileImage = await makeDisplayImage(file, MOBILE_IMAGE_SIZE, 0.72);
+    const displayFilename = `${filename.replace(/\.[^.]+$/, "")}.jpg`;
+
+    photo.displaySrc = `/display/${displayFilename}`;
+    photo.mobileSrc = `/mobile/${displayFilename}`;
     const nextPhotos = [photo, ...currentPhotos];
     const publicManifest = makePublicManifest(nextPhotos);
+
     const imageBase64 = await fileToBase64(file);
+    const displayBase64 = await blobToBase64(displayImage);
+    const mobileBase64 = await blobToBase64(mobileImage);
 
     setOwnerStatus("PUBLISHING");
     await commitGitHubChanges(`Add ${title}`, [
       { path: `public/photos/${filename}`, content: imageBase64, encoding: "base64" },
+      { path: `public/display/${displayFilename}`, content: displayBase64, encoding: "base64" },
+      { path: `public/mobile/${displayFilename}`, content: mobileBase64, encoding: "base64" },
       { path: "data/photos.json", content: `${JSON.stringify(nextPhotos, null, 2)}\n`, encoding: "utf-8" },
       { path: "public/photos.json", content: `${JSON.stringify(publicManifest, null, 2)}\n`, encoding: "utf-8" }
     ]);
 
-    photos = [{ ...photo, previewSrc: URL.createObjectURL(file) }, ...publicManifest.photos.slice(1)];
+    photos = [{ ...photo, previewSrc: URL.createObjectURL(mobileImage) }, ...publicManifest.photos.slice(1)];
     photoCount.textContent = `${String(photos.length).padStart(2, "0")} PHOTOS`;
     uploadForm.reset();
     ownerPanel.close();
@@ -924,9 +944,18 @@ async function deletePhotoFromGitHub(photo) {
     const nextPhotos = currentPhotos.filter((item) => item.id !== photo.id);
     const publicManifest = makePublicManifest(nextPhotos);
     const targetPath = target ? `public/${stripLeadingSlash(target.src)}` : `public/${stripLeadingSlash(sourcePath)}`;
+    const removals = [{ path: targetPath, remove: true }];
+
+    if (target?.displaySrc) {
+      removals.push({ path: `public/${stripLeadingSlash(target.displaySrc)}`, remove: true });
+    }
+
+    if (target?.mobileSrc) {
+      removals.push({ path: `public/${stripLeadingSlash(target.mobileSrc)}`, remove: true });
+    }
 
     await commitGitHubChanges(`Remove ${photo.title || "photo"}`, [
-      { path: targetPath, remove: true },
+      ...removals,
       { path: "data/photos.json", content: `${JSON.stringify(nextPhotos, null, 2)}\n`, encoding: "utf-8" },
       { path: "public/photos.json", content: `${JSON.stringify(publicManifest, null, 2)}\n`, encoding: "utf-8" }
     ]);
@@ -1032,13 +1061,64 @@ function makePublicManifest(sourcePhotos) {
 }
 
 function fileToBase64(file) {
+  return blobToBase64(file);
+}
+
+function blobToBase64(blob) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.addEventListener("load", () => {
       resolve(String(reader.result || "").split(",")[1] || "");
     });
     reader.addEventListener("error", () => reject(reader.error || new Error("Could not read file.")));
-    reader.readAsDataURL(file);
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function makeDisplayImage(file, maxSize, quality) {
+  const imageUrl = URL.createObjectURL(file);
+  try {
+    const image = await loadImageElement(imageUrl);
+    const scale = Math.min(1, maxSize / Math.max(image.naturalWidth, image.naturalHeight));
+    const width = Math.max(1, Math.round(image.naturalWidth * scale));
+    const height = Math.max(1, Math.round(image.naturalHeight * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d", { alpha: false });
+
+    if (!context) {
+      throw new Error("Canvas is unavailable.");
+    }
+
+    context.fillStyle = "#f4f4f2";
+    context.fillRect(0, 0, width, height);
+    context.drawImage(image, 0, 0, width, height);
+
+    return await canvasToBlob(canvas, "image/jpeg", quality);
+  } finally {
+    URL.revokeObjectURL(imageUrl);
+  }
+}
+
+function loadImageElement(src) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.addEventListener("load", () => resolve(image), { once: true });
+    image.addEventListener("error", () => reject(new Error("Could not optimize image.")), { once: true });
+    image.src = src;
+  });
+}
+
+function canvasToBlob(canvas, type, quality) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) {
+        resolve(blob);
+      } else {
+        reject(new Error("Could not export optimized image."));
+      }
+    }, type, quality);
   });
 }
 
@@ -1142,6 +1222,14 @@ function isGitHubPagesHost() {
   return window.location.hostname.endsWith("github.io");
 }
 
+function isCompactViewport() {
+  return window.innerWidth < 760 || /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+}
+
+function getRendererPixelRatio() {
+  return isCompactViewport() ? 1 : Math.min(window.devicePixelRatio || 1, 1.5);
+}
+
 function setTheme(theme) {
   document.documentElement.dataset.theme = theme;
   localStorage.setItem("at-theme", theme);
@@ -1152,6 +1240,12 @@ function setTheme(theme) {
 
 function getCssColor(variableName) {
   return getComputedStyle(document.documentElement).getPropertyValue(variableName).trim() || "#f4f4f2";
+}
+
+function getTextureSource(photo) {
+  if (photo.previewSrc) return photo.previewSrc;
+  if (isCompactViewport() && photo.mobileSrc) return photo.mobileSrc;
+  return photo.displaySrc || photo.mobileSrc || photo.src;
 }
 
 function resolveMediaPath(src) {

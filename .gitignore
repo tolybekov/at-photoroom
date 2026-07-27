@@ -2,3 +2,5 @@ node_modules/
 .DS_Store
 .album-secret
 .env
+__pycache__/
+*.pyc

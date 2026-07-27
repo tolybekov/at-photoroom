@@ -11,10 +11,16 @@ if (!Array.isArray(photos)) {
 const manifest = {
   photos: photos.map((photo) => ({
     ...photo,
-    src: typeof photo.src === "string" ? photo.src.replace(/^\/+/, "") : photo.src
+    src: stripLeadingSlash(photo.src),
+    displaySrc: stripLeadingSlash(photo.displaySrc),
+    mobileSrc: stripLeadingSlash(photo.mobileSrc)
   })),
   generatedAt: new Date().toISOString()
 };
 
 await writeFile(targetPath, `${JSON.stringify(manifest, null, 2)}\n`);
 console.log(`Wrote ${manifest.photos.length} public photos to public/photos.json`);
+
+function stripLeadingSlash(value) {
+  return typeof value === "string" ? value.replace(/^\/+/, "") : value;
+}

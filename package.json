@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "optimize:images": "python3 scripts/generate-display-images.py",
     "sync:static": "node scripts/sync-static-photos.mjs",
     "start": "node server.js"
   }

@@ -181,6 +181,9 @@ async function deletePhoto(id) {
     const photoPath = path.join(PHOTO_DIR, path.basename(target.src));
     await unlink(photoPath).catch(() => undefined);
   }
+
+  await unlinkPublicAsset(target?.displaySrc).catch(() => undefined);
+  await unlinkPublicAsset(target?.mobileSrc).catch(() => undefined);
 }
 
 async function serveStatic(req, res) {
@@ -259,16 +262,33 @@ async function writePhotos(photos) {
   await writeStaticManifest(photos);
 }
 
+async function unlinkPublicAsset(src) {
+  if (typeof src !== "string" || !src.startsWith("/")) return;
+
+  const assetPath = path.normalize(path.join(PUBLIC_DIR, src));
+  const relativePath = path.relative(PUBLIC_DIR, assetPath);
+
+  if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) return;
+
+  await unlink(assetPath);
+}
+
 async function writeStaticManifest(photos) {
   const staticPhotos = photos.map((photo) => ({
     ...photo,
-    src: typeof photo.src === "string" ? photo.src.replace(/^\/+/, "") : photo.src
+    src: stripLeadingSlash(photo.src),
+    displaySrc: stripLeadingSlash(photo.displaySrc),
+    mobileSrc: stripLeadingSlash(photo.mobileSrc)
   }));
   const manifest = {
     photos: staticPhotos,
     generatedAt: new Date().toISOString()
   };
   await writeFile(path.join(PUBLIC_DIR, "photos.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+}
+
+function stripLeadingSlash(value) {
+  return typeof value === "string" ? value.replace(/^\/+/, "") : value;
 }
 
 function makeSessionCookie() {

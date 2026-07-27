@@ -30,9 +30,10 @@ GitHub Pages is static hosting, so it cannot run the local upload server or keep
 
 On the live GitHub Pages site, the **OWNER** panel asks for a GitHub token instead of the local password. Use a token that can write to `tolybekov/at-photoroom` repository contents. The token is kept only in the current browser tab and is not committed into the website.
 
-You can also upload photos locally, then run:
+The site serves optimized display images for the 3D room so mobile Safari does not need to decode every full-size upload as a WebGL texture. You can also upload photos locally, then run:
 
 ```bash
+npm run optimize:images
 npm run sync:static
 ```
 
