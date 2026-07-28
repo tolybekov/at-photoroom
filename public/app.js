@@ -24,6 +24,7 @@ const GITHUB_API = `https://api.github.com/repos/${GITHUB_REPOSITORY}`;
 const MAX_GITHUB_UPLOAD_BYTES = 18 * 1024 * 1024;
 const DISPLAY_IMAGE_SIZE = 1600;
 const MOBILE_IMAGE_SIZE = 900;
+const FOCUS_Z_LIFT = 0.45;
 
 const renderer = new THREE.WebGLRenderer({
   canvas,
@@ -530,6 +531,10 @@ function fitItemToTexture(item) {
   const planeHeight = aspect >= 1 ? maxWide / aspect : maxTall;
   item.mesh.scale.set(planeWidth, planeHeight, 1);
   item.border.scale.set(planeWidth, planeHeight, 1);
+
+  if (item === selectedItem) {
+    focusCameraOnItem(item);
+  }
 }
 
 function makeBorder() {
@@ -608,7 +613,7 @@ function animate() {
     const floatY = Math.sin(elapsed * 0.45 + item.phase) * 0.12;
     const floatX = Math.cos(elapsed * 0.31 + item.phase) * 0.06;
     const targetPosition = isSelected
-      ? item.basePosition.clone().add(new THREE.Vector3(0, 0, 0.45))
+      ? item.basePosition.clone().add(new THREE.Vector3(0, 0, FOCUS_Z_LIFT))
       : item.basePosition.clone().add(new THREE.Vector3(floatX, floatY, 0));
 
     item.group.position.lerp(targetPosition, isSelected ? 0.1 : 0.035);
@@ -630,9 +635,7 @@ function animate() {
 function selectItem(item) {
   if (!item) return;
   selectedItem = item;
-  const worldPosition = item.group.getWorldPosition(new THREE.Vector3());
-  desiredTarget.copy(worldPosition);
-  desiredCamera.set(worldPosition.x, worldPosition.y + 0.08, worldPosition.z + 4.25);
+  focusCameraOnItem(item);
   desiredOrbit = { x: 0, y: 0 };
 
   const title = item.photo.title || "UNTITLED";
@@ -643,6 +646,40 @@ function selectItem(item) {
   focusMeta.title = meta;
   focusBar.classList.add("is-visible");
   syncOwnerForms();
+}
+
+function focusCameraOnItem(item) {
+  const focusPosition = getFocusedWorldPosition(item);
+  const distance = getFocusCameraDistance(item);
+  const visibleHeight = 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2) * distance;
+  const viewLift = visibleHeight * (isCompactViewport() ? 0.035 : 0.085);
+
+  desiredTarget.set(focusPosition.x, focusPosition.y + viewLift, focusPosition.z);
+  desiredCamera.set(focusPosition.x, focusPosition.y + viewLift, focusPosition.z + distance);
+}
+
+function getFocusedWorldPosition(item) {
+  return item.basePosition
+    .clone()
+    .add(new THREE.Vector3(0, 0, FOCUS_Z_LIFT))
+    .add(desiredPan);
+}
+
+function getFocusCameraDistance(item) {
+  const coverage = isCompactViewport()
+    ? { width: 0.78, height: 0.52, minDistance: 3.15 }
+    : { width: 0.42, height: 0.52, minDistance: 3.25 };
+  const planeWidth = Math.max(item.mesh.scale.x, 0.2);
+  const planeHeight = Math.max(item.mesh.scale.y, 0.2);
+  const tanHalfFov = Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2);
+  const distanceForHeight = planeHeight / (2 * tanHalfFov * coverage.height);
+  const distanceForWidth = planeWidth / (2 * tanHalfFov * camera.aspect * coverage.width);
+
+  return THREE.MathUtils.clamp(
+    Math.max(distanceForHeight, distanceForWidth, coverage.minDistance),
+    coverage.minDistance,
+    16
+  );
 }
 
 function clearFocus() {
@@ -680,10 +717,8 @@ function updateFocusBar() {
   const maxY = Math.max(...corners.map((corner) => corner.y));
   const photoWidth = maxX - minX;
   const mobile = window.innerWidth < 720;
-  const width = Math.max(
-    mobile ? 230 : 360,
-    Math.min(photoWidth + (mobile ? 44 : 180), window.innerWidth - 32)
-  );
+  const minReadableWidth = mobile ? 220 : 280;
+  const width = Math.min(Math.max(photoWidth, minReadableWidth), window.innerWidth - 32);
   const photoCenter = minX + photoWidth / 2;
   const left = Math.min(Math.max(photoCenter - width / 2, 16), window.innerWidth - width - 16);
 
